@@ -48,9 +48,62 @@ export default async function handler(req, res) {
     if (contentType.includes("text/html")) {
       let html = await upstream.text();
 
-      // Ganti semua kemunculan nama lama dengan nama baru
+      // Ganti semua kemunculan nama lama dengan nama baru (teks yang ada di HTML mentah)
       for (const [oldText, newText] of REPLACEMENTS) {
         html = html.split(oldText).join(newText);
+      }
+
+      // Skrip ini jalan di browser: mengganti teks yang dirender belakangan oleh JavaScript
+      // (misalnya halaman yang dibangun pakai React/Vue), termasuk judul tab.
+      const injectedScript = `
+<script>
+(function() {
+  var replacements = ${JSON.stringify(REPLACEMENTS)};
+
+  function replaceInNode(node) {
+    if (node.nodeType === 3) { // text node
+      var text = node.nodeValue;
+      replacements.forEach(function(pair) {
+        if (text.indexOf(pair[0]) !== -1) {
+          text = text.split(pair[0]).join(pair[1]);
+        }
+      });
+      if (text !== node.nodeValue) node.nodeValue = text;
+    } else if (node.nodeType === 1) {
+      for (var i = 0; i < node.childNodes.length; i++) {
+        replaceInNode(node.childNodes[i]);
+      }
+    }
+  }
+
+  function replaceTitle() {
+    var t = document.title;
+    replacements.forEach(function(pair) {
+      if (t.indexOf(pair[0]) !== -1) t = t.split(pair[0]).join(pair[1]);
+    });
+    if (t !== document.title) document.title = t;
+  }
+
+  function runAll() {
+    replaceTitle();
+    replaceInNode(document.body);
+  }
+
+  // Jalankan segera dan setiap kali ada perubahan DOM (misal React re-render)
+  document.addEventListener("DOMContentLoaded", runAll);
+  runAll();
+
+  var observer = new MutationObserver(function() { runAll(); });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+})();
+</script>
+`;
+
+      // Sisipkan skrip sebelum penutup </body>, atau di akhir kalau tidak ada tag itu
+      if (html.includes("</body>")) {
+        html = html.replace("</body>", injectedScript + "</body>");
+      } else {
+        html += injectedScript;
       }
 
       res.setHeader("content-type", "text/html; charset=utf-8");
