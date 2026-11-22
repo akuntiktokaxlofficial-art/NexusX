@@ -129,22 +129,25 @@ export default async function handler(req, res) {
     // === KUNCI BIAR SERVER NGANGGEB LU ASLI ===
     fwd["origin"] = TARGET_ORIGIN;
     fwd["referer"] = TARGET_ORIGIN + "/";
+    fwd["accept"] = "application/json, text/plain, */*";
     
-    // Terusin IP VPN lu ke server mereka
+    // Bypass IP Check
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     fwd["x-forwarded-for"] = clientIp;
     fwd["x-real-ip"] = clientIp;
 
-    // === DEBUG LOGGING (Biar lu tau isi server) ===
-    if (path.includes("api/") || path.includes("verify") || path.includes("auth")) {
-       console.log(`[PROXY API] Request ke: ${targetUrl}`);
-    }
-
     let body;
     if (!["GET", "HEAD"].includes(req.method) && req.body !== undefined) {
-      if (Buffer.isBuffer(req.body) || typeof req.body === "string") body = req.body;
-      else body = JSON.stringify(req.body);
-      if (!fwd["content-type"]) fwd["content-type"] = "application/json";
+      const contentType = req.headers["content-type"] || "";
+      // FIX: Kalau aslinya form-urlencoded, jangan diubah jadi JSON
+      if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
+        body = req.body;
+      } else if (contentType.includes("application/x-www-form-urlencoded")) {
+        body = new URLSearchParams(req.body).toString();
+      } else {
+        body = JSON.stringify(req.body);
+        if (!fwd["content-type"]) fwd["content-type"] = "application/json";
+      }
     }
 
     const upstream = await fetch(targetUrl, { method: req.method, headers: fwd, body, redirect: "manual" });
