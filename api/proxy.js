@@ -32,23 +32,32 @@ function buildClientScript() {
   var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
 
-  // 1. PAKSA PINDAH KE /HOME (Client-side)
-  if (window.location.pathname === "/" || window.location.pathname === "/index.html" || window.location.pathname === "/login") {
+  // 1. TRIK UI BYPASS: Suntik CSS buat nyembunyiin form key
+  var style = document.createElement('style');
+  style.innerHTML = \`
+    /* Sembunyiin container login (sesuaikan class-nya kalau perlu) */
+    body > div:first-child > div:first-child { display: none !important; }
+    /* Atau paksa form login jadi transparan */
+    form { display: none !important; }
+  \`;
+  document.head.appendChild(style);
+
+  // 2. KALAU DITENDANG BALIK KE ROOT, PAKSA KE /HOME
+  if (window.location.pathname === "/" || window.location.pathname === "/index.html") {
     window.location.replace("/home");
     return;
   }
 
-  // 2. CEGAH APLIKASI NGE-REDIRECT BALIK KE HALAMAN DEPAN
+  // 3. CEGAH JAVASCRIPT ASLI NENDANG KITA BALIK KE LOGIN
   var _replace = window.location.replace;
   window.location.replace = function(url) {
     if (url === "/" || url === "" || url.includes("login")) {
-      console.log("Proxy: Blocked redirect to " + url);
       return; // Blokir!
     }
     return _replace.apply(window.location, arguments);
   };
 
-  // 3. BELOKKAN SEMUA REQUEST API KE PROXY KITA
+  // 4. BELOKKAN REQUEST API
   function rewriteUrl(u) {
     if (typeof u !== "string") return u;
     try {
@@ -79,7 +88,7 @@ function buildClientScript() {
     return _open.apply(this, a);
   };
 
-  // 4. GANTI TEKS
+  // 5. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       var p = REPLACEMENTS[i];
@@ -147,7 +156,6 @@ export default async function handler(req, res) {
   try {
     let path = req.query.path || "";
     
-    // Tendang root ke /home
     if (path === "" || path === "/" || path === "index.html") {
       res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
@@ -213,14 +221,11 @@ export default async function handler(req, res) {
       res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
     }
 
-    // ===== TRIK BYPASS REDIRECT =====
-    // Kalau server asli nyoba nendang kita ke "/", kita BLOKIR redirect-nya.
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
       
       if (rel === "/" || rel === "" || rel.includes("login")) {
-        // Abaikan perintah redirect dari server, balikin halaman kosong atau lanjut
         res.writeHead(200, { "Content-Type": "text/html" });
         return res.end("<html><body><script>window.location.reload()</script></body></html>");
       }
