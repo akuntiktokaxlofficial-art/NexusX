@@ -51,7 +51,7 @@ function stripCookieDomain(cookie) {
 
 function buildClientScript() {
   return `
-  <!-- ERUDA CONSOLE BUAT IPHONE -->
+  <!-- ERUDA CONSOLE -->
   <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
   <script>eruda.init();</script>
   
@@ -60,7 +60,7 @@ function buildClientScript() {
   var FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
   var FAKE_USER = JSON.stringify({id: 1, name: "Nexus", role: "admin", premium: true, status: "active"});
 
-  // 1. SUNTIK LOCALSTORAGE & COOKIE (Pura-pura udah login)
+  // 1. SUNTIK STORAGE
   try {
     localStorage.setItem('token', FAKE_JWT);
     localStorage.setItem('user', FAKE_USER);
@@ -71,34 +71,37 @@ function buildClientScript() {
     document.cookie = "session=" + FAKE_JWT + "; path=/";
   } catch (e) {}
 
-  // 2. BIKIN TOMBOL BYPASS DI LAYAR
-  setTimeout(function() {
-    var btn = document.createElement('button');
-    btn.innerHTML = "🚀 FORCE BYPASS HOME";
-    btn.style.cssText = "position:fixed; top:10px; right:10px; z-index:999999; background:red; color:white; padding:15px; font-weight:bold; border-radius:10px; border:2px solid white; box-shadow:0 0 10px black;";
-    btn.onclick = function() {
-        console.log("Memaksa masuk /home...");
-        localStorage.setItem('token', FAKE_JWT);
-        localStorage.setItem('user', FAKE_USER);
-        window.location.href = "/home";
-    };
-    document.body.appendChild(btn);
-  }, 2000);
+  // 2. LUMPUHKAN REACT ROUTER (Sangat Agresif)
+  var _pushState = history.pushState;
+  var _replaceState = history.replaceState;
+  
+  function isBadUrl(url) {
+    if (typeof url !== "string") return false;
+    return url === "/" || url.includes("/login") || url === "";
+  }
 
-  // 3. CEGAT SEMUA REQUEST API (Nggak peduli URL-nya apa)
+  history.pushState = function(state, title, url) {
+    if (isBadUrl(url)) { console.log("Blocked pushState:", url); return; }
+    return _pushState.apply(this, arguments);
+  };
+  history.replaceState = function(state, title, url) {
+    if (isBadUrl(url)) { console.log("Blocked replaceState:", url); return; }
+    return _replaceState.apply(this, arguments);
+  };
+
+  var _assign = location.assign.bind(location);
+  var _replace = location.replace.bind(location);
+  location.assign = function(url) { if (isBadUrl(url)) return; return _assign(url); };
+  location.replace = function(url) { if (isBadUrl(url)) return; return _replace(url); };
+
+  // 3. PALSUKAN SEMUA RESPONSE API
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     var url = typeof input === "string" ? input : (input ? input.url : "");
-    console.log("FETCH:", url);
     
-    var method = init && init.method ? init.method.toUpperCase() : "GET";
-    if (method === "POST" || /verify|auth|login|check|validate|session|key/i.test(url)) {
-      console.log("BLOKIR & PALSUKAN RESPONSE:", url);
-      
-      setTimeout(function() {
-          window.location.href = "/home";
-      }, 800);
-
+    // Kalau URL-nya ngarah ke API, langsung balas SUKSES tanpa mikir
+    if (url.includes("/api/") || /verify|auth|login|check|user|profile/i.test(url)) {
+      console.log("FAKING API:", url);
       return Promise.resolve(new Response(JSON.stringify({
         status: "success", valid: true, success: true,
         token: FAKE_JWT,
@@ -116,18 +119,7 @@ function buildClientScript() {
     return _fetch.call(this, input, init);
   };
 
-  // 4. CEGAT REDIRECT BALIK KE LOGIN
-  function isLoginUrl(url) {
-    if (typeof url !== "string") return false;
-    return url === "/" || url.endsWith("/login") || url.includes("/login?");
-  }
-  var _replace = location.replace.bind(location);
-  location.replace = function(url) {
-    if (isLoginUrl(url)) return;
-    return _replace(url);
-  };
-
-  // 5. GANTI TEKS
+  // 4. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       if (t.indexOf(REPLACEMENTS[i][0]) !== -1) t = t.split(REPLACEMENTS[i][0]).join(REPLACEMENTS[i][1]);
@@ -149,6 +141,19 @@ function buildClientScript() {
       else for (var j = 0; j < m.addedNodes.length; j++) walk(m.addedNodes[j]);
     }
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+
+  // 5. TOMBOL PAMUNGKAS
+  setTimeout(function() {
+    var btn = document.createElement('button');
+    btn.innerHTML = "🚀 Paksa Masuk /home";
+    btn.style.cssText = "position:fixed; top:10px; right:10px; z-index:999999; background:red; color:white; padding:15px; font-weight:bold; border-radius:10px; border:2px solid white; box-shadow:0 0 10px black;";
+    btn.onclick = function() {
+        console.log("Membuka /home...");
+        window.location.href = "/home";
+    };
+    document.body.appendChild(btn);
+  }, 1500);
+
 })();</script>`;
 }
 
@@ -158,7 +163,6 @@ export default async function handler(req, res) {
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
     
-    // Handle kalau path-nya nyangkut /api/proxy gara-gara rewrite /(.*)
     if (path.startsWith("api/proxy")) {
        path = path.replace("api/proxy", "");
        if (path.startsWith("?")) path = path.substring(1);
@@ -205,6 +209,7 @@ export default async function handler(req, res) {
       }
     }
 
+    // KUNCI UTAMA: Tangkap semua redirect dari server asli sebelum diproses
     const upstream = await fetch(targetUrl, { method: req.method, headers: fwd, body, redirect: "manual" });
 
     let setCookies = [];
@@ -212,15 +217,18 @@ export default async function handler(req, res) {
     else { const single = upstream.headers.get("set-cookie"); if (single) setCookies = [single]; }
     if (setCookies.length) res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
 
+    // KUNCI UTAMA 2: JANGAN PERNAH izinkan server nge-redirect ke / atau /login
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
-      const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
       
-      if (rel === "/" || rel === "" || rel.includes("login")) {
-        res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
-        return res.end();
+      // Kalau server nyuruh balik ke depan/login, kita bohongin dengan ngasih HTML kosong
+      if (loc === "/" || loc === "" || loc.includes("login")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end("<html><body style='background:#0d0d1a;color:white;font-family:sans-serif;text-align:center;padding-top:50px;'><h1>Bypass Sukses</h1><p>Server mencoba me-redirect, tapi diblokir oleh Proxy.</p><a href='/home' style='color:cyan;'>Klik ke Home</a></body></html>");
       }
-      res.writeHead(upstream.status, { Location: rel, "Cache-Control": "no-store" });
+      
+      // Kalau redirect ke halaman lain yang sah, biarkan
+      res.writeHead(upstream.status, { Location: loc, "Cache-Control": "no-store" });
       return res.end();
     }
 
