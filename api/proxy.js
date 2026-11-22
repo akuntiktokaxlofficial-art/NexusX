@@ -58,6 +58,37 @@ export default async function handler(req, res) {
       const injectedScript = `
 <script>
 (function() {
+  // Belokkan semua panggilan fetch/XHR yang menuju domain asli
+  // supaya tetap lewat domain ini (proxy), bukan langsung ke server asli.
+  // Ini mencegah error CORS / "Load failed" saat halaman memanggil API-nya sendiri.
+  var ORIGINAL_ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
+
+  function rewriteUrl(url) {
+    try {
+      if (typeof url === "string" && url.indexOf(ORIGINAL_ORIGIN) === 0) {
+        return url.slice(ORIGINAL_ORIGIN.length) || "/";
+      }
+    } catch (e) {}
+    return url;
+  }
+
+  var originalFetch = window.fetch;
+  window.fetch = function(input, init) {
+    if (typeof input === "string") {
+      input = rewriteUrl(input);
+    } else if (input && input.url) {
+      input = new Request(rewriteUrl(input.url), input);
+    }
+    return originalFetch.call(this, input, init);
+  };
+
+  var originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    var args = Array.prototype.slice.call(arguments);
+    args[1] = rewriteUrl(url);
+    return originalOpen.apply(this, args);
+  };
+
   var replacements = ${JSON.stringify(REPLACEMENTS)};
 
   function replaceInNode(node) {
