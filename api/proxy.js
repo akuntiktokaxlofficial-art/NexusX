@@ -39,7 +39,6 @@ function stripCookieDomain(cookie) {
 function buildClientScript() {
   return `
   <style>
-  /* Warna Merah */
   :root { --primary: #ef4444 !important; --accent: #dc2626 !important; }
   .bg-purple-500, .bg-purple-600, .bg-purple-700, .bg-violet-500, .bg-violet-600, 
   [style*="#a855f7"], [style*="#8b5cf6"], [style*="#7c3aed"] { background-color: #ef4444 !important; border-color: #ef4444 !important; }
@@ -106,9 +105,7 @@ function buildClientScript() {
 }
 
 export const config = {
-  api: {
-    bodyParser: false, // MATIKIN PARSER OTOMATIS VERCEL
-  },
+  api: { bodyParser: false }, // Matiin parser Vercel
 };
 
 export default async function handler(req, res) {
@@ -132,10 +129,13 @@ export default async function handler(req, res) {
       fwd[k] = value;
     }
 
+    // === SPOOF HEADERS BIAR NGGAK DI-BLOCK ===
     fwd["origin"] = TARGET_ORIGIN;
     fwd["referer"] = TARGET_ORIGIN + "/";
-
-    // Baca raw body stream
+    // Samarin User-Agent kayak Chrome HP
+    fwd["user-agent"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1";
+    
+    // Baca Raw Body
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       body = await new Promise((resolve, reject) => {
@@ -183,8 +183,19 @@ export default async function handler(req, res) {
       return res.end(html);
     }
 
-    // Kalau JSON / API Response, terusin mentah-mentah
-    const buf = Buffer.from(await upstream.arrayBuffer());
+    // === NIRU BUG [object Object] DARI WEB ASLI ===
+    let buf = Buffer.from(await upstream.arrayBuffer());
+    
+    if (ct.includes("application/json")) {
+      try {
+        let json = JSON.parse(buf.toString());
+        // Kalau API ngebalikin error, kita manipulasi dikit biar frontend-nya nampilin [object Object]
+        if (json.status === "error" || json.error || json.success === false) {
+           buf = Buffer.from(JSON.stringify({ error: { message: json.message || "Error" } }));
+        }
+      } catch(e) {}
+    }
+
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
     for (const [k, v] of upstream.headers) {
