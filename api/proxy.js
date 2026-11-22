@@ -58,57 +58,51 @@ function buildClientScript() {
   <script>(function(){
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
   var FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+  var FAKE_USER = JSON.stringify({id: 1, name: "Nexus", role: "admin", premium: true, status: "active"});
 
-  // 1. SUNTIK LOCALSTORAGE & COOKIE
+  // 1. SUNTIK LOCALSTORAGE & COOKIE (Pura-pura udah login)
   try {
     localStorage.setItem('token', FAKE_JWT);
+    localStorage.setItem('user', FAKE_USER);
     localStorage.setItem('auth', 'true');
     localStorage.setItem('isLoggedIn', 'true');
-    localStorage.setItem('key', 'VALID-KEY');
+    localStorage.setItem('session', FAKE_JWT);
     document.cookie = "token=" + FAKE_JWT + "; path=/";
+    document.cookie = "session=" + FAKE_JWT + "; path=/";
   } catch (e) {}
 
-  var _getItem = Storage.prototype.getItem;
-  Storage.prototype.getItem = function(key) {
-    var val = _getItem.call(this, key);
-    if (/token|auth|key|login|session/i.test(key) && (!val || val === "null" || val === "false" || val === "")) {
-       return key.toLowerCase().includes("token") ? FAKE_JWT : "true";
-    }
-    return val;
-  };
+  // 2. BIKIN TOMBOL BYPASS DI LAYAR
+  setTimeout(function() {
+    var btn = document.createElement('button');
+    btn.innerHTML = "🚀 FORCE BYPASS HOME";
+    btn.style.cssText = "position:fixed; top:10px; right:10px; z-index:999999; background:red; color:white; padding:15px; font-weight:bold; border-radius:10px; border:2px solid white; box-shadow:0 0 10px black;";
+    btn.onclick = function() {
+        console.log("Memaksa masuk /home...");
+        localStorage.setItem('token', FAKE_JWT);
+        localStorage.setItem('user', FAKE_USER);
+        window.location.href = "/home";
+    };
+    document.body.appendChild(btn);
+  }, 2000);
 
-  // 2. BLOKIR REDIRECT KE LOGIN
-  function isLoginUrl(url) {
-    if (typeof url !== "string") return false;
-    return url === "/" || url.endsWith("/login") || url.includes("/login?");
-  }
-  
-  var _replace = location.replace.bind(location);
-  location.replace = function(url) {
-    if (isLoginUrl(url)) { console.log("Blocked replace to login"); return; }
-    return _replace(url);
-  };
-
-  // 3. LOG & PALSUKAN API
+  // 3. CEGAT SEMUA REQUEST API (Nggak peduli URL-nya apa)
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     var url = typeof input === "string" ? input : (input ? input.url : "");
     console.log("FETCH:", url);
     
-    if (/verify|auth|login|check|validate|session/i.test(url)) {
-      console.log("FAKING SUCCESS FOR:", url);
+    var method = init && init.method ? init.method.toUpperCase() : "GET";
+    if (method === "POST" || /verify|auth|login|check|validate|session|key/i.test(url)) {
+      console.log("BLOKIR & PALSUKAN RESPONSE:", url);
       
-      // PAKSA PINDAH KE /HOME
       setTimeout(function() {
-          console.log("Redirecting to /home...");
           window.location.href = "/home";
-      }, 1000);
+      }, 800);
 
       return Promise.resolve(new Response(JSON.stringify({
-        status: "success", 
-        valid: true, 
+        status: "success", valid: true, success: true,
         token: FAKE_JWT,
-        data: { token: FAKE_JWT, status: "success" },
+        data: { token: FAKE_JWT, user: JSON.parse(FAKE_USER) },
         message: "Login Berhasil"
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     }
@@ -122,7 +116,18 @@ function buildClientScript() {
     return _fetch.call(this, input, init);
   };
 
-  // 4. GANTI TEKS
+  // 4. CEGAT REDIRECT BALIK KE LOGIN
+  function isLoginUrl(url) {
+    if (typeof url !== "string") return false;
+    return url === "/" || url.endsWith("/login") || url.includes("/login?");
+  }
+  var _replace = location.replace.bind(location);
+  location.replace = function(url) {
+    if (isLoginUrl(url)) return;
+    return _replace(url);
+  };
+
+  // 5. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       if (t.indexOf(REPLACEMENTS[i][0]) !== -1) t = t.split(REPLACEMENTS[i][0]).join(REPLACEMENTS[i][1]);
@@ -153,6 +158,12 @@ export default async function handler(req, res) {
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
     
+    // Handle kalau path-nya nyangkut /api/proxy gara-gara rewrite /(.*)
+    if (path.startsWith("api/proxy")) {
+       path = path.replace("api/proxy", "");
+       if (path.startsWith("?")) path = path.substring(1);
+    }
+
     if (!path) {
       res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
