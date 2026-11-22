@@ -1,4 +1,4 @@
-// language: JavaScript, file: api/proxy.js, runtime: Vercel Node 20, target: Node fetch + raw res
+// language: JavaScript, file: api/proxy.js, runtime: Vercel Node 20
 
 const TARGET_ORIGIN = "https://app.dripwire.cc";
 const NEW_NAME = "NEXUS XIT";
@@ -9,8 +9,6 @@ const REPLACEMENTS = [
   ["dripwire", NEW_NAME.toLowerCase()],
 ];
 
-// Ganti hanya di text node: lewati <tag ...>, <script>…</script>, <style>…</style>.
-// Atribut (href, src, class, id) tidak disentuh supaya asset dan route tidak 404.
 function renameInHtmlTextNodes(html) {
   return html.replace(
     /(<script\b[^>]*>[\s\S]*?<\/script>)|(<style\b[^>]*>[\s\S]*?<\/style>)|(<[^>]*>)|([^<]+)/gi,
@@ -25,17 +23,23 @@ function renameInHtmlTextNodes(html) {
   );
 }
 
-// Buang Domain= supaya cookie menempel ke host proxy, bukan app.dripwire.cc.
 function stripCookieDomain(cookie) {
   return cookie.replace(/;\s*domain=[^;]*/gi, "");
 }
 
-// Script client: ganti teks yang dirender JS + belokkan fetch ke origin sendiri
-// supaya tetap lewat proxy. Blokir pendaftaran service worker.
 function buildClientScript() {
   return `<script>(function(){
   var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
   var PROTO_REL = ORIGIN.replace(/^https?:/, "");
+
+  // ===== PAKSA PINDAH KE /HOME =====
+  // Kalau masih nyangkut di halaman depan atau halaman login, lempar ke /home
+  if (window.location.pathname === "/" || window.location.pathname === "" || window.location.pathname.includes("login")) {
+    window.location.replace("/home");
+    return;
+  }
+  // ================================
+
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
 
   function rewriteUrl(u) {
@@ -45,11 +49,19 @@ function buildClientScript() {
     return u;
   }
 
+  // FIX FETCH ERROR: Handle Request object dengan benar biar nggak "Load failed"
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     try {
-      if (typeof input === "string") input = rewriteUrl(input);
-      else if (input && input.url) input = new Request(rewriteUrl(input.url), input);
+      var url = typeof input === "string" ? input : (input && input.url ? input.url : "");
+      var newUrl = rewriteUrl(url);
+      
+      if (typeof input === "string") {
+        return _fetch.call(this, newUrl, init);
+      } else if (input instanceof Request) {
+        var req = new Request(newUrl, input);
+        return _fetch.call(this, req);
+      }
     } catch (e) {}
     return _fetch.call(this, input, init);
   };
@@ -69,7 +81,7 @@ function buildClientScript() {
   if (navigator.serviceWorker) {
     try {
       navigator.serviceWorker.register = function() {
-        return Promise.reject(new Error("service worker blocked by proxy"));
+        return Promise.reject(new Error("sw blocked"));
       };
     } catch (e) {}
   }
@@ -133,41 +145,34 @@ function buildClientScript() {
 
 export default async function handler(req, res) {
   try {
-    const rawUrl = req.url || "/";
+    let path = req.query.path || "";
+    const rawUrl = path ? (path.startsWith("/") ? path : "/" + path) : "/";
 
-    // ====== 1. AUTO REDIRECT KE /home ======
-    // Kalau buka halaman depan (root), langsung lempar ke /home
-    if (rawUrl === "/" || rawUrl === "/index.html") {
+    // ===== 1. SERVER-SIDE REDIRECT (Bypass Total) =====
+    // Kalau yang dibuka root (/) ATAU halaman login, langsung tendang ke /home
+    if (rawUrl === "/" || rawUrl === "/index.html" || rawUrl.includes("login")) {
       res.statusCode = 302;
       res.setHeader("location", "/home");
+      // Paksa browser jangan cache redirect ini
+      res.setHeader("cache-control", "no-store, max-age=0, must-revalidate");
       return res.end();
-    }
-
-    // Jaga akses langsung ke endpoint proxy
-    if (rawUrl === "/api/proxy" || rawUrl.startsWith("/api/proxy?")) {
-      res.statusCode = 404;
-      return res.end("not found");
     }
 
     const targetUrl = TARGET_ORIGIN + rawUrl;
 
-    // ====== 2. FORWARD HEADERS ======
+    // ===== 2. FORWARD HEADERS =====
     const fwd = {};
-    for (const h of [
-      "user-agent", "accept", "accept-language", "content-type",
-      "authorization", "cache-control",
-    ]) {
+    for (const h of ["user-agent", "accept", "accept-language", "content-type", "authorization", "cache-control"]) {
       if (req.headers[h]) fwd[h] = req.headers[h];
     }
     if (req.headers["cookie"]) fwd["cookie"] = req.headers["cookie"];
     fwd["origin"] = TARGET_ORIGIN;
     if (req.headers["referer"]) {
-      const ourOrigin =
-        (req.headers["x-forwarded-proto"] || "https") + "://" + req.headers["host"];
+      const ourOrigin = (req.headers["x-forwarded-proto"] || "https") + "://" + req.headers["host"];
       fwd["referer"] = req.headers["referer"].split(ourOrigin).join(TARGET_ORIGIN);
     }
 
-    // ====== 3. BODY ======
+    // ===== 3. BODY =====
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       if (req.body === undefined) {
@@ -185,7 +190,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ====== 4. FETCH UPSTREAM ======
+    // ===== 4. FETCH UPSTREAM =====
     const upstream = await fetch(targetUrl, {
       method: req.method,
       headers: fwd,
@@ -193,7 +198,7 @@ export default async function handler(req, res) {
       redirect: "manual",
     });
 
-    // ====== 5. SET-COOKIE ======
+    // ===== 5. SET-COOKIE =====
     let setCookies = [];
     if (typeof upstream.headers.getSetCookie === "function") {
       setCookies = upstream.headers.getSetCookie();
@@ -205,12 +210,10 @@ export default async function handler(req, res) {
       res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
     }
 
-    // ====== 6. REDIRECTS ======
+    // ===== 6. REDIRECTS =====
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
-      const rel = loc.startsWith(TARGET_ORIGIN)
-        ? loc.slice(TARGET_ORIGIN.length) || "/"
-        : loc;
+      const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
       res.statusCode = upstream.status;
       res.setHeader("location", rel);
       return res.end();
@@ -218,7 +221,7 @@ export default async function handler(req, res) {
 
     const ct = upstream.headers.get("content-type") || "";
 
-    // ====== 7. HTML PROCESSING ======
+    // ===== 7. HTML PROCESSING =====
     if (ct.includes("text/html")) {
       let html = await upstream.text();
       html = renameInHtmlTextNodes(html);
@@ -230,11 +233,11 @@ export default async function handler(req, res) {
       }
       res.statusCode = upstream.status;
       res.setHeader("content-type", "text/html; charset=utf-8");
-      res.setHeader("cache-control", "private, no-store");
+      res.setHeader("cache-control", "private, no-store, max-age=0, must-revalidate");
       return res.end(html);
     }
 
-    // ====== 8. NON-HTML PASSTHROUGH ======
+    // ===== 8. NON-HTML PASSTHROUGH =====
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
