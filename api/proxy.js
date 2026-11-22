@@ -9,6 +9,7 @@ const REPLACEMENTS = [
   ["dripwire", NEW_NAME.toLowerCase()],
 ];
 
+// Header yang dibuang biar CSS & script injeksi kita nggak diblokir sama server asli
 const DROP_RESPONSE_HEADERS = new Set([
   "content-security-policy", "content-security-policy-report-only", "x-frame-options",
   "content-length", "content-encoding", "transfer-encoding", "connection", "strict-transport-security",
@@ -28,56 +29,6 @@ function renameInHtmlTextNodes(html) {
   );
 }
 
-// ==== KUNCI UTAMA: BAJAK __NEXT_DATA__ ====
-function spoofNextData(html) {
-  const fakeUser = JSON.stringify({
-    id: "1", name: "Nexus", email: "nexus@local.host", role: "admin",
-    premium: true, status: "active", plan: "lifetime",
-  });
-  const fakeToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-
-  return html.replace(
-    /<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i,
-    (match, jsonText) => {
-      try {
-        const data = JSON.parse(jsonText);
-        
-        function flip(obj) {
-          if (!obj || typeof obj !== "object") return;
-          for (const k of Object.keys(obj)) {
-            const lk = k.toLowerCase();
-            if (["authenticated","isauthenticated","isloggedin","loggedin","valid","authorized","success","isvalid","premium","ispremium","active"].includes(lk)) {
-              obj[k] = true;
-            }
-            else if (["token","accesstoken","session","apikey","key"].includes(lk)) {
-              obj[k] = fakeToken;
-            }
-            else if (lk === "user" || lk === "account" || lk === "profile") {
-              obj[k] = JSON.parse(fakeUser);
-            }
-            else if (obj[k] && typeof obj[k] === "object") {
-              flip(obj[k]);
-            }
-          }
-        }
-        flip(data);
-
-        if (data.props && data.props.pageProps) {
-          data.props.pageProps.user = JSON.parse(fakeUser);
-          data.props.pageProps.isLoggedIn = true;
-          data.props.pageProps.token = fakeToken;
-        }
-
-        // Escape '<' biar JSON nggak ngerusak tag <script>
-        const safeJson = JSON.stringify(data).replace(/</g, '\\u003c');
-        return `<script id="__NEXT_DATA__" type="application/json">${safeJson}</script>`;
-      } catch (e) {
-        return match;
-      }
-    }
-  );
-}
-
 function stripCookieDomain(cookie) {
   let c = cookie.replace(/;\s*domain=[^;]*/gi, "");
   if (!/samesite=/i.test(c)) c += "; SameSite=None";
@@ -88,55 +39,135 @@ function stripCookieDomain(cookie) {
 
 function buildClientScript() {
   return `
-  <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-  <script>try { eruda.init(); } catch(e) {}</script>
-  <script>
-  (function(){
-    var FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+  <style>
+  /* OVERRIDE WARNA UNGU JADI MERAH */
+  :root {
+    --primary: #ef4444 !important;
+    --primary-color: #ef4444 !important;
+    --accent: #dc2626 !important;
+    --purple: #ef4444 !important;
+  }
+  .bg-purple-500, .bg-purple-600, .bg-purple-700, .bg-violet-500, .bg-violet-600, 
+  [style*="#a855f7"], [style*="#8b5cf6"], [style*="#7c3aed"] {
+    background-color: #ef4444 !important;
+    border-color: #ef4444 !important;
+  }
+  .text-purple-400, .text-purple-500, .text-purple-600, .text-violet-400, .text-violet-500 {
+    color: #ef4444 !important;
+  }
+  .border-purple-500, .border-purple-600, .border-violet-500 {
+    border-color: #ef4444 !important;
+  }
+  [style*="box-shadow: 0 0 20px #a855f7"] {
+    box-shadow: 0 0 20px #ef4444 !important;
+  }
+  </style>
+
+  <script>(function(){
+  var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
+
+  // BELOKKAN SEMUA REQUEST API KE PROXY KITA (Biar Cookie / Session jalan normal)
+  function rewriteUrl(u) {
+    if (typeof u !== "string") return u;
     try {
-      localStorage.setItem('token', FAKE_JWT);
-      localStorage.setItem('auth', 'true');
-      localStorage.setItem('isLoggedIn', 'true');
-      document.cookie = "token=" + FAKE_JWT + "; path=/";
-    } catch(e){}
-
-    var _rep = location.replace.bind(location);
-    location.replace = function(u){ if(u === "/" || /\\/login/.test(u)) return; _rep(u); };
-    
-    var _push = history.pushState;
-    history.pushState = function(s,t,u){ if(u === "/" || /\\/login/.test(u)) return; _push.apply(this, arguments); };
-
-    var _f = window.fetch;
-    window.fetch = function(i, init){
-      var u = typeof i === "string" ? i : (i ? i.url : "");
-      if (/\\/api\\/|verify|auth|login|check|user|me/i.test(u)) {
-        return Promise.resolve(new Response(JSON.stringify({
-          status:"success", valid:true, success:true, authenticated:true, token:FAKE_JWT,
-          user: {id:"1", name:"Nexus", premium:true, role:"admin"}, 
-          data: {token:FAKE_JWT, user:{id:"1", name:"Nexus", premium:true}}
-        }), {status:200, headers:{'Content-Type':'application/json'}}));
+      if (u.includes("dripwire.cc")) {
+        var urlObj = new URL(u, window.location.origin);
+        return urlObj.pathname + urlObj.search + urlObj.hash;
       }
-      return _f.call(this, i, init);
-    };
-  })();
-  </script>`;
+    } catch (e) {}
+    return u;
+  }
+
+  var _fetch = window.fetch;
+  window.fetch = function(input, init) {
+    if (init) init.credentials = 'include';
+    else init = { credentials: 'include' };
+    try {
+      if (typeof input === "string") input = rewriteUrl(input);
+      else if (input && input.url) {
+        var newUrl = rewriteUrl(input.url);
+        if (newUrl !== input.url) input = new Request(newUrl, input);
+      }
+    } catch (e) {}
+    return _fetch.call(this, input, init);
+  };
+
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(m, u) {
+    var a = [].slice.call(arguments);
+    a[1] = rewriteUrl(u);
+    return _open.apply(this, a);
+  };
+
+  // GANTI TEKS
+  function renameText(t) {
+    for (var i = 0; i < REPLACEMENTS.length; i++) {
+      var p = REPLACEMENTS[i];
+      if (t.indexOf(p[0]) !== -1) t = t.split(p[0]).join(p[1]);
+    }
+    return t;
+  }
+
+  function walk(node) {
+    if (!node) return;
+    if (node.nodeType === 3) {
+      var nv = node.nodeValue;
+      var out = renameText(nv);
+      if (out !== nv) node.nodeValue = out;
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (node.tagName === "SCRIPT" || node.tagName === "STYLE") return;
+    for (var i = 0; i < node.childNodes.length; i++) walk(node.childNodes[i]);
+  }
+
+  function renameTitle() {
+    var t = document.title;
+    var out = renameText(t);
+    if (out !== t) document.title = out;
+  }
+
+  var dirty = new Set();
+  var pending = false;
+  function flush() {
+    pending = false;
+    renameTitle();
+    var arr = [];
+    for (var n of dirty) if (n.isConnected) arr.push(n);
+    dirty.clear();
+    for (var i = 0; i < arr.length; i++) walk(arr[i]);
+  }
+
+  if (document.body) walk(document.body);
+  document.addEventListener("DOMContentLoaded", function () {
+    if (document.body) walk(document.body);
+  });
+
+  new MutationObserver(function (muts) {
+    for (var i = 0; i < muts.length; i++) {
+      var m = muts[i];
+      if (m.type === "characterData") dirty.add(m.target);
+      else for (var j = 0; j < m.addedNodes.length; j++) dirty.add(m.addedNodes[j]);
+    }
+    if (!pending) { pending = true; requestAnimationFrame(flush); }
+  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+})();</script>`;
 }
 
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") return res.status(204).end();
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
 
   try {
-    let path = (req.query.path || "").replace(/^\/+/, "");
+    let path = req.query.path || "";
     
-    if (path.startsWith("api/proxy")) {
-      path = path.replace("api/proxy", "");
-      if (path.startsWith("?")) path = path.substring(1);
-    }
-
-    // LANGSUNG TEMBAK /home KALAU LU BUKA ROOT
-    if (!path) {
-      path = "home"; 
-    }
+    // (Logika tendang ke /home udah DIHAPUS. Biarin root nampilin halaman asli)
 
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(req.query)) {
@@ -151,26 +182,58 @@ export default async function handler(req, res) {
       if (["host", "connection", "content-length", "accept-encoding"].includes(k)) continue;
       fwd[k] = value;
     }
+    
     fwd["origin"] = TARGET_ORIGIN;
-    fwd["cookie"] = (fwd["cookie"] ? fwd["cookie"] + "; " : "") + "token=bypass; session=bypass; auth=true";
     if (req.headers["referer"]) {
-      fwd["referer"] = req.headers["referer"].replace(`https://${req.headers["host"]}`, TARGET_ORIGIN);
+      const ourOrigin = `https://${req.headers["host"]}`;
+      fwd["referer"] = req.headers["referer"].replace(ourOrigin, TARGET_ORIGIN);
     }
 
-    const upstream = await fetch(targetUrl, { method: req.method, headers: fwd, redirect: "manual" });
+    let body;
+    if (!["GET", "HEAD"].includes(req.method)) {
+      if (req.body === undefined) {
+        body = await new Promise((resolve, reject) => {
+          const chunks = [];
+          req.on("data", (c) => chunks.push(c));
+          req.on("end", () => resolve(Buffer.concat(chunks)));
+          req.on("error", reject);
+        });
+      } else if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
+        body = req.body;
+      } else {
+        const contentType = req.headers["content-type"] || "";
+        if (contentType.includes("application/x-www-form-urlencoded")) {
+          body = new URLSearchParams(req.body).toString();
+        } else {
+          body = JSON.stringify(req.body);
+          if (!fwd["content-type"]) fwd["content-type"] = "application/json";
+        }
+      }
+    }
+
+    const upstream = await fetch(targetUrl, {
+      method: req.method,
+      headers: fwd,
+      body,
+      redirect: "manual",
+    });
 
     let setCookies = [];
-    if (typeof upstream.headers.getSetCookie === "function") setCookies = upstream.headers.getSetCookie();
-    else { const single = upstream.headers.get("set-cookie"); if (single) setCookies = [single]; }
-    if (setCookies.length) res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
+    if (typeof upstream.headers.getSetCookie === "function") {
+      setCookies = upstream.headers.getSetCookie();
+    } else {
+      const single = upstream.headers.get("set-cookie");
+      if (single) setCookies = [single];
+    }
+    if (setCookies.length) {
+      res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
+    }
 
+    // (Logika Bypass redirect udah DIHAPUS. Teruskan redirect apa adanya)
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
-      if (loc === "/" || loc === "" || loc.includes("login")) {
-        res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
-        return res.end();
-      }
-      res.writeHead(upstream.status, { Location: loc, "Cache-Control": "no-store" });
+      const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
+      res.writeHead(upstream.status, { Location: rel, "Cache-Control": "no-store" });
       return res.end();
     }
 
@@ -178,16 +241,19 @@ export default async function handler(req, res) {
 
     if (ct.includes("text/html")) {
       let html = await upstream.text();
-
-      html = spoofNextData(html);
       html = renameInHtmlTextNodes(html);
-
-      const script = "\n" + buildClientScript(); // Kasih newline biar nggak nyambung ke script React
-      html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, () => script + "</body>") : html + script;
-
+      
+      const script = buildClientScript();
+      if (/<\/body>/i.test(html)) {
+        html = html.replace(/<\/body>/i, () => script + "</body>");
+      } else {
+        html += script;
+      }
+      
       res.statusCode = upstream.status;
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.setHeader("cache-control", "private, no-store, max-age=0, must-revalidate");
+      
       for (const [k, v] of upstream.headers) {
         if (!DROP_RESPONSE_HEADERS.has(k.toLowerCase()) && k.toLowerCase() !== "set-cookie") res.setHeader(k, v);
       }
@@ -197,11 +263,12 @@ export default async function handler(req, res) {
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
+    
     for (const [k, v] of upstream.headers) {
       if (!DROP_RESPONSE_HEADERS.has(k.toLowerCase()) && k.toLowerCase() !== "set-cookie") res.setHeader(k, v);
     }
     return res.end(buf);
-
+    
   } catch (err) {
     res.statusCode = 502;
     res.setHeader("content-type", "text/plain; charset=utf-8");
