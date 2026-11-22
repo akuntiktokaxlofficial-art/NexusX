@@ -30,36 +30,32 @@ function stripCookieDomain(cookie) {
 function buildClientScript() {
   return `<script>(function(){
   var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
-  var PROTO_REL = ORIGIN.replace(/^https?:/, "");
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
 
-  // 1. PAKSA PINDAH KE /HOME (Client-side)
-  if (window.location.pathname === "/" || window.location.pathname === "/index.html") {
-    window.location.replace("/home");
-    return;
-  }
-
-  // 2. CEGAH DITENDANG BALIK KE HALAMAN DEPAN
-  // Kalau aplikasi aslinya nyoba nge-redirect kita ke "/", kita blokir!
-  var _replace = window.location.replace;
-  window.location.replace = function(url) {
-    if (url === "/" || url === "" || url.includes("login")) return; 
-    return _replace.apply(window.location, arguments);
-  };
-
-  // 3. BELOKKAN SEMUA REQUEST KE PROXY
+  // 1. BELOKKAN SEMUA REQUEST (Fetch, XHR, Axios) KE DOMAIN KITA
   function rewriteUrl(u) {
     if (typeof u !== "string") return u;
-    if (u.indexOf(ORIGIN) === 0) return u.slice(ORIGIN.length) || "/";
-    if (u.indexOf(PROTO_REL) === 0) return u.slice(PROTO_REL.length) || "/";
+    try {
+      // Kalau URL-nya ngarah ke dripwire, potong domainnya biar relative ke proxy kita
+      if (u.includes("dripwire.cc")) {
+        var urlObj = new URL(u, window.location.origin);
+        return urlObj.pathname + urlObj.search + urlObj.hash;
+      }
+    } catch (e) {}
     return u;
   }
 
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     try {
-      if (typeof input === "string") input = rewriteUrl(input);
-      else if (input && input.url) input = new Request(rewriteUrl(input.url), input);
+      if (typeof input === "string") {
+        input = rewriteUrl(input);
+      } else if (input && input.url) {
+        var newUrl = rewriteUrl(input.url);
+        if (newUrl !== input.url) {
+          input = new Request(newUrl, input);
+        }
+      }
     } catch (e) {}
     return _fetch.call(this, input, init);
   };
@@ -71,7 +67,19 @@ function buildClientScript() {
     return _open.apply(this, a);
   };
 
-  // 4. GANTI TEKS DI DOM
+  if (navigator.sendBeacon) {
+    var _beacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function(u, d) { return _beacon(rewriteUrl(u), d); };
+  }
+
+  // 2. CEGAH DITENDANG BALIK KE HALAMAN DEPAN DARI DALAM SCRIPT
+  var _pushState = history.pushState;
+  history.pushState = function() {
+    if (arguments[2] === "/" || arguments[2] === "") return;
+    return _pushState.apply(this, arguments);
+  };
+
+  // 3. GANTI TEKS DI LAYAR
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       var p = REPLACEMENTS[i];
@@ -127,7 +135,7 @@ function buildClientScript() {
 }
 
 export default async function handler(req, res) {
-  // ====== 0. HANDLE CORS (Biar "Load failed" hilang) ======
+  // Handle CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -140,13 +148,13 @@ export default async function handler(req, res) {
   try {
     let path = req.query.path || "";
     
-    // Server-side redirect kalau buka root
+    // Redirect root
     if (path === "" || path === "/" || path === "index.html") {
       res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
     }
 
-    // Rekonstruksi URL (termasuk query string)
+    // Rekonstruksi URL
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(req.query)) {
       if (key !== "path") searchParams.append(key, value);
@@ -154,10 +162,10 @@ export default async function handler(req, res) {
     const query = searchParams.toString() ? `?${searchParams.toString()}` : "";
     const targetUrl = `${TARGET_ORIGIN}/${path}${query}`;
 
-    // Teruskan semua header
+    // Teruskan header
     const fwd = {};
     for (const [key, value] of Object.entries(req.headers)) {
-      if (!["host", "connection", "content-length"].includes(key.toLowerCase())) {
+      if (!["host", "connection", "content-length", "accept-encoding"].includes(key.toLowerCase())) {
         fwd[key] = value;
       }
     }
@@ -168,7 +176,7 @@ export default async function handler(req, res) {
       fwd["referer"] = req.headers["referer"].replace(ourOrigin, TARGET_ORIGIN);
     }
 
-    // Handle Body
+    // Handle Body (Benerin Form & JSON)
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       if (req.body === undefined) {
@@ -181,8 +189,14 @@ export default async function handler(req, res) {
       } else if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
         body = req.body;
       } else {
-        body = JSON.stringify(req.body);
-        if (!fwd["content-type"]) fwd["content-type"] = "application/json";
+        // Vercel udah parse body-nya
+        const contentType = req.headers["content-type"] || "";
+        if (contentType.includes("application/x-www-form-urlencoded")) {
+          body = new URLSearchParams(req.body).toString();
+        } else {
+          body = JSON.stringify(req.body);
+          if (!fwd["content-type"]) fwd["content-type"] = "application/json";
+        }
       }
     }
 
@@ -205,7 +219,7 @@ export default async function handler(req, res) {
       res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
     }
 
-    // Handle Redirect dari server asli
+    // Redirect dari upstream
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
@@ -215,7 +229,6 @@ export default async function handler(req, res) {
 
     const ct = upstream.headers.get("content-type") || "";
 
-    // Proses HTML
     if (ct.includes("text/html")) {
       let html = await upstream.text();
       html = renameInHtmlTextNodes(html);
@@ -231,7 +244,6 @@ export default async function handler(req, res) {
       return res.end(html);
     }
 
-    // File statis (JS, CSS, Gambar)
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.statusCode = upstream.status;
     res.setHeader("content-type", ct || "application/octet-stream");
