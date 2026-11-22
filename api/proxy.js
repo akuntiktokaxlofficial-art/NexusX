@@ -39,29 +39,19 @@ function stripCookieDomain(cookie) {
 function buildClientScript() {
   return `
   <style>
-  /* OVERRIDE WARNA UNGU JADI MERAH */
   :root { --primary: #ef4444 !important; --accent: #dc2626 !important; }
   .bg-purple-500, .bg-purple-600, .bg-purple-700, .bg-violet-500, .bg-violet-600, 
-  [style*="#a855f7"], [style*="#8b5cf6"], [style*="#7c3aed"] {
-    background-color: #ef4444 !important; border-color: #ef4444 !important;
-  }
-  .text-purple-400, .text-purple-500, .text-purple-600, .text-violet-400, .text-violet-500 {
-    color: #ef4444 !important;
-  }
-  .border-purple-500, .border-purple-600, .border-violet-500 {
-    border-color: #ef4444 !important;
-  }
+  [style*="#a855f7"], [style*="#8b5cf6"], [style*="#7c3aed"] { background-color: #ef4444 !important; border-color: #ef4444 !important; }
+  .text-purple-400, .text-purple-500, .text-purple-600, .text-violet-400, .text-violet-500 { color: #ef4444 !important; }
+  .border-purple-500, .border-purple-600, .border-violet-500 { border-color: #ef4444 !important; }
   </style>
 
   <script>(function(){
   var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
-  var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
 
-  // 1. BELOKKAN API KE PROXY KITA (TAPI KRIM KE SERVER ASLI)
   function rewriteUrl(u) {
     if (typeof u !== "string") return u;
     try {
-      // Kalau URL-nya mutlak (http), ubah jadi relatif biar lewat proxy lu
       if (u.includes("dripwire.cc")) {
         var urlObj = new URL(u, window.location.origin);
         return urlObj.pathname + urlObj.search + urlObj.hash;
@@ -72,10 +62,7 @@ function buildClientScript() {
 
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
-    // Paksa cookies dikirim
-    if (init) init.credentials = 'include';
-    else init = { credentials: 'include' };
-    
+    if (init) init.credentials = 'include'; else init = { credentials: 'include' };
     try {
       if (typeof input === "string") input = rewriteUrl(input);
       else if (input && input.url) {
@@ -93,7 +80,6 @@ function buildClientScript() {
     return _open.apply(this, a);
   };
 
-  // 2. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       if (t.indexOf(REPLACEMENTS[i][0]) !== -1) t = t.split(REPLACEMENTS[i][0]).join(REPLACEMENTS[i][1]);
@@ -124,11 +110,7 @@ export default async function handler(req, res) {
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
     
-    // Kalau root, lempar ke halaman asli (biar form login muncul)
-    if (!path) {
-      res.writeHead(302, { Location: "/login", "Cache-Control": "no-store" });
-      return res.end();
-    }
+    if (!path) { res.writeHead(302, { Location: "/login", "Cache-Control": "no-store" }); return res.end(); }
 
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(req.query)) {
@@ -144,13 +126,19 @@ export default async function handler(req, res) {
       fwd[k] = value;
     }
 
-    // ===== KUNCI AGAR SERVER MAU TERIMA KEY LU =====
-    // Pura-pura request ini datang dari web asli mereka
+    // === KUNCI BIAR SERVER NGANGGEB LU ASLI ===
     fwd["origin"] = TARGET_ORIGIN;
-    fwd["referer"] = TARGET_ORIGIN + "/"; 
+    fwd["referer"] = TARGET_ORIGIN + "/";
     
-    // Teruskan cookie yang ada (biar session login nyambung)
-    // Kalau nggak ada cookie, biarin aja kosong
+    // Terusin IP VPN lu ke server mereka
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    fwd["x-forwarded-for"] = clientIp;
+    fwd["x-real-ip"] = clientIp;
+
+    // === DEBUG LOGGING (Biar lu tau isi server) ===
+    if (path.includes("api/") || path.includes("verify") || path.includes("auth")) {
+       console.log(`[PROXY API] Request ke: ${targetUrl}`);
+    }
 
     let body;
     if (!["GET", "HEAD"].includes(req.method) && req.body !== undefined) {
@@ -166,7 +154,6 @@ export default async function handler(req, res) {
     else { const single = upstream.headers.get("set-cookie"); if (single) setCookies = [single]; }
     if (setCookies.length) res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
 
-    // Teruskan redirect dari server mereka
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
