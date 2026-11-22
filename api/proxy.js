@@ -9,7 +9,6 @@ const REPLACEMENTS = [
   ["dripwire", NEW_NAME.toLowerCase()],
 ];
 
-// Header yang wajib dibuang biar script injeksi jalan & HTML nggak kepotong
 const DROP_RESPONSE_HEADERS = new Set([
   "content-security-policy",
   "content-security-policy-report-only",
@@ -51,33 +50,66 @@ function stripCookieDomain(cookie) {
 }
 
 function buildClientScript() {
-  return `<script>(function(){
-  var ORIGIN = ${JSON.stringify(TARGET_ORIGIN)};
-  var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
-
-  // 1. BLOKIR REDIRECT KE LOGIN
-  var _replace = location.replace.bind(location);
-  var _assign = location.assign.bind(location);
+  return `
+  <!-- ERUDA CONSOLE BUAT IPHONE -->
+  <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+  <script>eruda.init();</script>
   
-  function checkUrl(url) {
-    if (typeof url !== "string") return true;
-    if (url === "/" || url === "" || url.includes("login")) return false;
-    return true;
+  <script>(function(){
+  var REPLACEMENTS = ${JSON.stringify(REPLACEMENTS)};
+  var FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+  // 1. SUNTIK LOCALSTORAGE & COOKIE
+  try {
+    localStorage.setItem('token', FAKE_JWT);
+    localStorage.setItem('auth', 'true');
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('key', 'VALID-KEY');
+    document.cookie = "token=" + FAKE_JWT + "; path=/";
+  } catch (e) {}
+
+  var _getItem = Storage.prototype.getItem;
+  Storage.prototype.getItem = function(key) {
+    var val = _getItem.call(this, key);
+    if (/token|auth|key|login|session/i.test(key) && (!val || val === "null" || val === "false" || val === "")) {
+       return key.toLowerCase().includes("token") ? FAKE_JWT : "true";
+    }
+    return val;
+  };
+
+  // 2. BLOKIR REDIRECT KE LOGIN
+  function isLoginUrl(url) {
+    if (typeof url !== "string") return false;
+    return url === "/" || url.endsWith("/login") || url.includes("/login?");
   }
   
-  location.replace = function(url) { if (checkUrl(url)) _replace(url); };
-  location.assign = function(url) { if (checkUrl(url)) _assign(url); };
+  var _replace = location.replace.bind(location);
+  location.replace = function(url) {
+    if (isLoginUrl(url)) { console.log("Blocked replace to login"); return; }
+    return _replace(url);
+  };
 
-  // 2. BOHONGIN RESPONSE API VERIFIKASI
+  // 3. LOG & PALSUKAN API
   var _fetch = window.fetch;
   window.fetch = function(input, init) {
     var url = typeof input === "string" ? input : (input ? input.url : "");
+    console.log("FETCH:", url);
     
-    // Kalau request ke API verify/login, langsung balas SUKSES
-    if (url.includes("/verify") || url.includes("/auth") || url.includes("/login")) {
-      console.log("Proxy: Memalsukan response login sukses untuk " + url);
+    if (/verify|auth|login|check|validate|session/i.test(url)) {
+      console.log("FAKING SUCCESS FOR:", url);
+      
+      // PAKSA PINDAH KE /HOME
+      setTimeout(function() {
+          console.log("Redirecting to /home...");
+          window.location.href = "/home";
+      }, 1000);
+
       return Promise.resolve(new Response(JSON.stringify({
-        status: "success", valid: true, token: "bypassed_token_123", message: "Login Berhasil"
+        status: "success", 
+        valid: true, 
+        token: FAKE_JWT,
+        data: { token: FAKE_JWT, status: "success" },
+        message: "Login Berhasil"
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     }
 
@@ -90,42 +122,21 @@ function buildClientScript() {
     return _fetch.call(this, input, init);
   };
 
-  // 3. BOHONGIN XMLHttpRequest (Buat web jadul)
-  var _open = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(m, u) {
-    if (typeof u === "string" && (u.includes("/verify") || u.includes("/auth") || u.includes("/login"))) {
-       this.send = function() {
-          Object.defineProperty(this, 'status', { value: 200 });
-          Object.defineProperty(this, 'responseText', { value: '{"status":"success","valid":true,"token":"bypassed"}' });
-          Object.defineProperty(this, 'readyState', { value: 4 });
-          if (this.onreadystatechange) this.onreadystatechange();
-          if (this.onload) this.onload();
-       };
-       return;
-    }
-    var a = [].slice.call(arguments);
-    if (typeof u === "string" && u.includes("dripwire.cc")) a[1] = new URL(u, location.origin).pathname;
-    return _open.apply(this, a);
-  };
-
-  // 4. GANTI TEKS (Rename)
+  // 4. GANTI TEKS
   function renameText(t) {
     for (var i = 0; i < REPLACEMENTS.length; i++) {
       if (t.indexOf(REPLACEMENTS[i][0]) !== -1) t = t.split(REPLACEMENTS[i][0]).join(REPLACEMENTS[i][1]);
     }
     return t;
   }
-
   function walk(node) {
     if (!node) return;
     if (node.nodeType === 3) { var nv = node.nodeValue, out = renameText(nv); if (out !== nv) node.nodeValue = out; return; }
     if (node.nodeType !== 1 || node.tagName === "SCRIPT" || node.tagName === "STYLE") return;
     for (var i = 0; i < node.childNodes.length; i++) walk(node.childNodes[i]);
   }
-
   if (document.body) walk(document.body);
   document.addEventListener("DOMContentLoaded", function () { if (document.body) walk(document.body); });
-
   new MutationObserver(function (muts) {
     for (var i = 0; i < muts.length; i++) {
       var m = muts[i];
@@ -142,7 +153,6 @@ export default async function handler(req, res) {
   try {
     let path = (req.query.path || "").replace(/^\/+/, "");
     
-    // Redirect root ke /home
     if (!path) {
       res.writeHead(302, { Location: "/home", "Cache-Control": "no-store" });
       return res.end();
@@ -191,7 +201,6 @@ export default async function handler(req, res) {
     else { const single = upstream.headers.get("set-cookie"); if (single) setCookies = [single]; }
     if (setCookies.length) res.setHeader("set-cookie", setCookies.map(stripCookieDomain));
 
-    // Bypass Redirect Server (Jangan sampe balik ke login)
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const loc = upstream.headers.get("location") || "/";
       const rel = loc.startsWith(TARGET_ORIGIN) ? loc.slice(TARGET_ORIGIN.length) || "/" : loc;
